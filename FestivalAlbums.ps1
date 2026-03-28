@@ -37,9 +37,9 @@ Add-Type -AssemblyName System.Web
 
 $Config = @{
 
-    # ClientId and CalendarificApiKey are NOT stored here.
-    # They are collected via a popup dialog on first run and saved to:
-    #   $env:APPDATA\FestivalAlbums\config.json
+    # ClientId is the only value stored locally (%APPDATA%\FestivalAlbums\config.json).
+    # The Calendarific API key is stored securely in OneDrive (Apps/FestivalTimeline/settings.json)
+    # and is loaded after sign-in. Neither value is stored in this script.
 
     # How many past years to scan for festival photos.
     YearsToScan        = 30
@@ -51,7 +51,7 @@ $Config = @{
     # Lower = safer resume, but slightly more API calls.
     CheckpointEvery    = 20
 
-    # OneDrive folder where state and cache files are stored (auto-created).
+    # OneDrive folder where state, cache, and settings files are stored (auto-created).
     StateFolder        = 'Apps/FestivalTimeline'
 
     # ── Festivals to create albums for ───────────────────────────────────────
@@ -70,8 +70,11 @@ $Config = @{
     )
 }
 
-# Local path where credentials are persisted between runs
+# Local path — stores only the Azure App ClientId (not the API key)
 $LocalConfigPath = "$env:APPDATA\FestivalAlbums\config.json"
+
+# OneDrive path — stores the Calendarific API key (never in git, never on disk)
+$OneDriveSettingsPath = "$($Config.StateFolder)/settings.json"
 
 # Album name = festival name + this suffix  (e.g. "DiwaliLifetime")
 $AlbumSuffix = 'Lifetime'
@@ -83,10 +86,8 @@ $ImageExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff')
 $GraphBase = 'https://graph.microsoft.com/v1.0'
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CREDENTIALS POPUP
-#  Shows a WinForms dialog to collect ClientId and Calendarific API key.
-#  Values are saved to %APPDATA%\FestivalAlbums\config.json so the popup
-#  only appears on first run (or when credentials are missing/reset).
+#  LOCAL CONFIG  — Stores only the Azure App ClientId on this machine.
+#  The Calendarific API key is stored in OneDrive instead (see below).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -96,28 +97,25 @@ function Load-LocalConfig {
     if (Test-Path $LocalConfigPath) {
         try {
             $raw = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
-            if ($raw.ClientId -and $raw.CalendarificApiKey) {
-                return @{ ClientId = $raw.ClientId; CalendarificApiKey = $raw.CalendarificApiKey }
-            }
+            if ($raw.ClientId) { return @{ ClientId = $raw.ClientId } }
         } catch {}
     }
     return $null
 }
 
 function Save-LocalConfig {
-    param([string]$ClientId, [string]$CalendarificApiKey)
+    param([string]$ClientId)
     $dir = Split-Path $LocalConfigPath
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-    @{ ClientId = $ClientId; CalendarificApiKey = $CalendarificApiKey } |
-        ConvertTo-Json | Set-Content -Path $LocalConfigPath -Encoding UTF8
+    @{ ClientId = $ClientId } | ConvertTo-Json | Set-Content -Path $LocalConfigPath -Encoding UTF8
 }
 
-function Show-CredentialsDialog {
-    param([string]$CurrentClientId = '', [string]$CurrentApiKey = '')
+function Show-ClientIdDialog {
+    param([string]$Current = '')
 
     $form = [System.Windows.Forms.Form]@{
-        Text            = 'Festival Albums — First Time Setup'
-        Size            = [System.Drawing.Size]::new(520, 420)
+        Text            = 'Festival Albums — Azure App Setup'
+        Size            = [System.Drawing.Size]::new(520, 310)
         StartPosition   = 'CenterScreen'
         FormBorderStyle = 'FixedDialog'
         MaximizeBox     = $false
@@ -125,7 +123,6 @@ function Show-CredentialsDialog {
         BackColor       = [System.Drawing.Color]::WhiteSmoke
     }
 
-    # ── Header ──
     $header = [System.Windows.Forms.Label]@{
         Text      = '🪔  Festival Albums for OneDrive'
         Location  = [System.Drawing.Point]::new(20, 15)
@@ -134,82 +131,190 @@ function Show-CredentialsDialog {
         ForeColor = [System.Drawing.Color]::DarkSlateBlue
     }
 
-    $subHeader = [System.Windows.Forms.Label]@{
-        Text      = 'Two one-time setup values are needed. Links below guide you through each.'
-        Location  = [System.Drawing.Point]::new(20, 45)
+    $sub = [System.Windows.Forms.Label]@{
+        Text      = 'Enter your Azure App Client ID to allow this script to access your OneDrive.'
+        Location  = [System.Drawing.Point]::new(20, 47)
         Size      = [System.Drawing.Size]::new(470, 20)
         Font      = [System.Drawing.Font]::new('Segoe UI', 9)
         ForeColor = [System.Drawing.Color]::DimGray
     }
 
-    # ── Client ID ──
-    $lblClient = [System.Windows.Forms.Label]@{
+    $lbl = [System.Windows.Forms.Label]@{
         Text     = 'Azure App Client ID'
         Location = [System.Drawing.Point]::new(20, 90)
         Size     = [System.Drawing.Size]::new(200, 20)
         Font     = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
     }
 
-    $linkClient = [System.Windows.Forms.LinkLabel]@{
-        Text     = 'How to get this →'
+    $link = [System.Windows.Forms.LinkLabel]@{
+        Text     = 'How to register a free app →'
         Location = [System.Drawing.Point]::new(230, 90)
-        Size     = [System.Drawing.Size]::new(250, 20)
+        Size     = [System.Drawing.Size]::new(260, 20)
         Font     = [System.Drawing.Font]::new('Segoe UI', 9)
     }
-    $linkClient.add_LinkClicked({ Start-Process 'https://aka.ms/AppRegistrations' })
+    $link.add_LinkClicked({ Start-Process 'https://aka.ms/AppRegistrations' })
 
-    $txtClient = [System.Windows.Forms.TextBox]@{
-        Location    = [System.Drawing.Point]::new(20, 114)
-        Size        = [System.Drawing.Size]::new(460, 26)
-        Font        = [System.Drawing.Font]::new('Consolas', 10)
-        Text        = $CurrentClientId
+    $txt = [System.Windows.Forms.TextBox]@{
+        Location        = [System.Drawing.Point]::new(20, 114)
+        Size            = [System.Drawing.Size]::new(460, 26)
+        Font            = [System.Drawing.Font]::new('Consolas', 10)
+        Text            = $Current
         PlaceholderText = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
     }
 
-    $noteClient = [System.Windows.Forms.Label]@{
-        Text      = 'Register a free app at portal.azure.com → App Registrations (Personal accounts only, Files.ReadWrite permission, public client flow enabled).'
-        Location  = [System.Drawing.Point]::new(20, 145)
+    $note = [System.Windows.Forms.Label]@{
+        Text      = 'Register at portal.azure.com → App Registrations. Personal accounts only.' +
+                    ' Add redirect URI http://localhost:8765/ and Files.ReadWrite permission.'
+        Location  = [System.Drawing.Point]::new(20, 146)
         Size      = [System.Drawing.Size]::new(460, 36)
         Font      = [System.Drawing.Font]::new('Segoe UI', 8)
         ForeColor = [System.Drawing.Color]::Gray
     }
 
-    # ── Calendarific API Key ──
-    $lblApi = [System.Windows.Forms.Label]@{
+    $btnOk = [System.Windows.Forms.Button]@{
+        Text         = 'Save && Continue'
+        Location     = [System.Drawing.Point]::new(320, 224)
+        Size         = [System.Drawing.Size]::new(155, 36)
+        BackColor    = [System.Drawing.Color]::DarkSlateBlue
+        ForeColor    = [System.Drawing.Color]::White
+        FlatStyle    = 'Flat'
+        Font         = [System.Drawing.Font]::new('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+        DialogResult = 'OK'
+    }
+
+    $btnCancel = [System.Windows.Forms.Button]@{
+        Text         = 'Cancel'
+        Location     = [System.Drawing.Point]::new(230, 224)
+        Size         = [System.Drawing.Size]::new(80, 36)
+        FlatStyle    = 'Flat'
+        Font         = [System.Drawing.Font]::new('Segoe UI', 10)
+        DialogResult = 'Cancel'
+    }
+
+    $savNote = [System.Windows.Forms.Label]@{
+        Text      = '🔒 Saved locally to %APPDATA%\FestivalAlbums\config.json'
+        Location  = [System.Drawing.Point]::new(20, 234)
+        Size      = [System.Drawing.Size]::new(360, 20)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
+        ForeColor = [System.Drawing.Color]::DimGray
+    }
+
+    $form.AcceptButton = $btnOk
+    $form.CancelButton = $btnCancel
+    $form.Controls.AddRange(@($header, $sub, $lbl, $link, $txt, $note, $btnOk, $btnCancel, $savNote))
+
+    if ($form.ShowDialog() -ne 'OK') { Write-Host '[Setup] Cancelled.'; exit 0 }
+
+    $clientId = $txt.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($clientId)) {
+        [System.Windows.Forms.MessageBox]::Show('Client ID is required.', 'Missing Value',
+            'OK', 'Warning') | Out-Null
+        return Show-ClientIdDialog -Current $clientId
+    }
+
+    Save-LocalConfig -ClientId $clientId
+    Write-Host '[Setup] Client ID saved locally.' -ForegroundColor Green
+    return $clientId
+}
+
+# Load or prompt for ClientId
+$localCreds = Load-LocalConfig
+if (-not $localCreds) {
+    Write-Host '[Setup] No Client ID found — opening setup dialog...' -ForegroundColor Yellow
+    $Config.ClientId = Show-ClientIdDialog
+} else {
+    $Config.ClientId = $localCreds.ClientId
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ONEDRIVE SETTINGS  — Calendarific API key stored in OneDrive, not locally.
+#  Loaded after authentication. Popup shown if key is missing or blank.
+#  File: Apps/FestivalTimeline/settings.json  (inside your OneDrive)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Load-OneDriveSettings {
+    Write-Host '[Settings] Loading settings from OneDrive...' -ForegroundColor Cyan
+    $raw = Read-OneDriveJson -RelativePath $OneDriveSettingsPath
+    if ($raw -and $raw.CalendarificApiKey) {
+        Write-Host '[Settings] Calendarific API key loaded from OneDrive.' -ForegroundColor Green
+        return $raw.CalendarificApiKey
+    }
+    return $null
+}
+
+function Save-OneDriveSettings {
+    param([string]$ApiKey)
+    Write-OneDriveJson -RelativePath $OneDriveSettingsPath -Data @{
+        CalendarificApiKey = $ApiKey
+        saved_on           = (Get-Date -Format 'o')
+    }
+    Write-Host '[Settings] API key saved to OneDrive.' -ForegroundColor Green
+}
+
+function Show-ApiKeyDialog {
+    param([string]$Current = '')
+
+    $form = [System.Windows.Forms.Form]@{
+        Text            = 'Festival Albums — Calendarific API Key'
+        Size            = [System.Drawing.Size]::new(520, 280)
+        StartPosition   = 'CenterScreen'
+        FormBorderStyle = 'FixedDialog'
+        MaximizeBox     = $false
+        MinimizeBox     = $false
+        BackColor       = [System.Drawing.Color]::WhiteSmoke
+    }
+
+    $header = [System.Windows.Forms.Label]@{
+        Text      = '🗓️  Calendarific API Key Required'
+        Location  = [System.Drawing.Point]::new(20, 15)
+        Size      = [System.Drawing.Size]::new(470, 28)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
+        ForeColor = [System.Drawing.Color]::DarkSlateBlue
+    }
+
+    $sub = [System.Windows.Forms.Label]@{
+        Text      = 'This key is used to fetch Hindu festival dates. It will be saved securely' +
+                    ' in your OneDrive — not on this machine or in any code.'
+        Location  = [System.Drawing.Point]::new(20, 47)
+        Size      = [System.Drawing.Size]::new(470, 36)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 9)
+        ForeColor = [System.Drawing.Color]::DimGray
+    }
+
+    $lbl = [System.Windows.Forms.Label]@{
         Text     = 'Calendarific API Key'
-        Location = [System.Drawing.Point]::new(20, 200)
+        Location = [System.Drawing.Point]::new(20, 97)
         Size     = [System.Drawing.Size]::new(200, 20)
         Font     = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
     }
 
-    $linkApi = [System.Windows.Forms.LinkLabel]@{
+    $link = [System.Windows.Forms.LinkLabel]@{
         Text     = 'Get a free key →'
-        Location = [System.Drawing.Point]::new(230, 200)
-        Size     = [System.Drawing.Size]::new(250, 20)
+        Location = [System.Drawing.Point]::new(230, 97)
+        Size     = [System.Drawing.Size]::new(260, 20)
         Font     = [System.Drawing.Font]::new('Segoe UI', 9)
     }
-    $linkApi.add_LinkClicked({ Start-Process 'https://calendarific.com/sign-up' })
+    $link.add_LinkClicked({ Start-Process 'https://calendarific.com/sign-up' })
 
-    $txtApi = [System.Windows.Forms.TextBox]@{
-        Location        = [System.Drawing.Point]::new(20, 224)
+    $txt = [System.Windows.Forms.TextBox]@{
+        Location        = [System.Drawing.Point]::new(20, 121)
         Size            = [System.Drawing.Size]::new(460, 26)
         Font            = [System.Drawing.Font]::new('Consolas', 10)
-        Text            = $CurrentApiKey
-        PlaceholderText = 'Your Calendarific API key'
+        Text            = $Current
+        PlaceholderText = 'Paste your Calendarific API key here'
     }
 
-    $noteApi = [System.Windows.Forms.Label]@{
-        Text      = 'Free tier gives 1,000 calls/month. This script uses ~30 calls total per run.'
-        Location  = [System.Drawing.Point]::new(20, 255)
+    $note = [System.Windows.Forms.Label]@{
+        Text      = 'Free tier: 1,000 calls/month. This script uses ~30 calls total per run.'
+        Location  = [System.Drawing.Point]::new(20, 153)
         Size      = [System.Drawing.Size]::new(460, 20)
         Font      = [System.Drawing.Font]::new('Segoe UI', 8)
         ForeColor = [System.Drawing.Color]::Gray
     }
 
-    # ── Buttons ──
     $btnOk = [System.Windows.Forms.Button]@{
-        Text         = 'Save && Continue'
-        Location     = [System.Drawing.Point]::new(310, 330)
+        Text         = 'Save to OneDrive'
+        Location     = [System.Drawing.Point]::new(310, 200)
         Size         = [System.Drawing.Size]::new(160, 36)
         BackColor    = [System.Drawing.Color]::DarkSlateBlue
         ForeColor    = [System.Drawing.Color]::White
@@ -220,16 +325,16 @@ function Show-CredentialsDialog {
 
     $btnCancel = [System.Windows.Forms.Button]@{
         Text         = 'Cancel'
-        Location     = [System.Drawing.Point]::new(220, 330)
+        Location     = [System.Drawing.Point]::new(220, 200)
         Size         = [System.Drawing.Size]::new(80, 36)
         FlatStyle    = 'Flat'
         Font         = [System.Drawing.Font]::new('Segoe UI', 10)
         DialogResult = 'Cancel'
     }
 
-    $note = [System.Windows.Forms.Label]@{
-        Text      = '🔒 Saved to %APPDATA%\FestivalAlbums\config.json — never sent anywhere.'
-        Location  = [System.Drawing.Point]::new(20, 340)
+    $savNote = [System.Windows.Forms.Label]@{
+        Text      = '🔒 Saved to OneDrive: Apps/FestivalTimeline/settings.json'
+        Location  = [System.Drawing.Point]::new(20, 210)
         Size      = [System.Drawing.Size]::new(360, 20)
         Font      = [System.Drawing.Font]::new('Segoe UI', 8)
         ForeColor = [System.Drawing.Color]::DimGray
@@ -237,47 +342,19 @@ function Show-CredentialsDialog {
 
     $form.AcceptButton = $btnOk
     $form.CancelButton = $btnCancel
-    $form.Controls.AddRange(@(
-        $header, $subHeader,
-        $lblClient, $linkClient, $txtClient, $noteClient,
-        $lblApi,    $linkApi,    $txtApi,    $noteApi,
-        $btnOk, $btnCancel, $note
-    ))
+    $form.Controls.AddRange(@($header, $sub, $lbl, $link, $txt, $note, $btnOk, $btnCancel, $savNote))
 
-    $result = $form.ShowDialog()
+    if ($form.ShowDialog() -ne 'OK') { Write-Host '[Settings] Cancelled.'; exit 0 }
 
-    if ($result -ne 'OK') {
-        Write-Host '[Setup] Cancelled.' -ForegroundColor Yellow
-        exit 0
+    $key = $txt.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        [System.Windows.Forms.MessageBox]::Show('API key is required.', 'Missing Value',
+            'OK', 'Warning') | Out-Null
+        return Show-ApiKeyDialog -Current $key
     }
 
-    $clientId = $txtClient.Text.Trim()
-    $apiKey   = $txtApi.Text.Trim()
-
-    if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($apiKey)) {
-        [System.Windows.Forms.MessageBox]::Show(
-            'Both fields are required. Please fill in the Client ID and API Key.',
-            'Missing Values',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        ) | Out-Null
-        return Show-CredentialsDialog -CurrentClientId $clientId -CurrentApiKey $apiKey
-    }
-
-    Save-LocalConfig -ClientId $clientId -CalendarificApiKey $apiKey
-    Write-Host '[Setup] Credentials saved.' -ForegroundColor Green
-    return @{ ClientId = $clientId; CalendarificApiKey = $apiKey }
+    return $key
 }
-
-# Load saved credentials or show popup
-$localCreds = Load-LocalConfig
-if (-not $localCreds) {
-    Write-Host '[Setup] No saved credentials found — opening setup dialog...' -ForegroundColor Yellow
-    $localCreds = Show-CredentialsDialog
-}
-
-$Config.ClientId           = $localCreds.ClientId
-$Config.CalendarificApiKey = $localCreds.CalendarificApiKey
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  AUTHENTICATION  — Microsoft Graph Authorization Code Flow (browser popup)
@@ -886,6 +963,16 @@ Get-AccessToken
 
 # Ensure the state folder exists in OneDrive before any reads/writes
 Ensure-OneDriveFolder -FolderPath $Config.StateFolder
+
+# ── Load API key from OneDrive (after auth so we can read OneDrive) ─────────
+Write-Host "`n[Settings] Checking for Calendarific API key in OneDrive..." -ForegroundColor Cyan
+$apiKey = Load-OneDriveSettings
+if (-not $apiKey) {
+    Write-Host '[Settings] API key not found in OneDrive — opening dialog...' -ForegroundColor Yellow
+    $apiKey = Show-ApiKeyDialog
+    Save-OneDriveSettings -ApiKey $apiKey
+}
+$Config.CalendarificApiKey = $apiKey
 
 # ── Load State ─────────────────────────────────────────────────────────────
 $state = Load-State

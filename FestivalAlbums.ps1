@@ -27,19 +27,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Required for HttpUtility.ParseQueryString (OAuth redirect parsing)
+Add-Type -AssemblyName System.Web
+
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION  — Edit this section before running for the first time
+#  CONFIGURATION  — Credentials are collected via popup on first run and saved
+#                   locally. All other settings can be changed here freely.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 $Config = @{
 
-    # Your Azure App Registration Client ID.
-    # Leave blank to see setup instructions.
-    ClientId           = ''
-
-    # Your Calendarific API key.
-    # Leave blank to see setup instructions.
-    CalendarificApiKey = ''
+    # ClientId and CalendarificApiKey are NOT stored here.
+    # They are collected via a popup dialog on first run and saved to:
+    #   $env:APPDATA\FestivalAlbums\config.json
 
     # How many past years to scan for festival photos.
     YearsToScan        = 30
@@ -70,6 +70,9 @@ $Config = @{
     )
 }
 
+# Local path where credentials are persisted between runs
+$LocalConfigPath = "$env:APPDATA\FestivalAlbums\config.json"
+
 # Album name = festival name + this suffix  (e.g. "DiwaliLifetime")
 $AlbumSuffix = 'Lifetime'
 
@@ -80,138 +83,327 @@ $ImageExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff')
 $GraphBase = 'https://graph.microsoft.com/v1.0'
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  FIRST-TIME SETUP GUIDE
+#  CREDENTIALS POPUP
+#  Shows a WinForms dialog to collect ClientId and Calendarific API key.
+#  Values are saved to %APPDATA%\FestivalAlbums\config.json so the popup
+#  only appears on first run (or when credentials are missing/reset).
 # ═══════════════════════════════════════════════════════════════════════════════
 
-function Show-SetupGuide {
-    param([string[]]$Missing)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
-    $bar = '═' * 62
-    Write-Host "`n$bar" -ForegroundColor Cyan
-    Write-Host '  FIRST-TIME SETUP REQUIRED' -ForegroundColor Yellow
-    Write-Host "$bar`n" -ForegroundColor Cyan
-
-    $step = 1
-
-    if ('ClientId' -in $Missing) {
-        Write-Host "  STEP $step — Register a Microsoft Azure App" -ForegroundColor Green
-        Write-Host ('  ' + '─' * 55)
-        Write-Host '  This gives the script permission to access YOUR OneDrive.'
-        Write-Host '  Takes ~3 minutes. No credit card required.'
-        Write-Host ''
-        Write-Host '  1. Open in your browser:'
-        Write-Host '       https://aka.ms/AppRegistrations' -ForegroundColor Cyan
-        Write-Host '     Sign in with the same account as your OneDrive.'
-        Write-Host ''
-        Write-Host '  2. Click [ + New registration ]'
-        Write-Host '       Name:                    Festival Photo Albums'
-        Write-Host '       Supported account types: Personal Microsoft accounts only'
-        Write-Host '       Redirect URI:            (leave blank)'
-        Write-Host '       Click [ Register ]'
-        Write-Host ''
-        Write-Host '  3. On the app Overview page:'
-        Write-Host '       Copy "Application (client) ID"'
-        Write-Host '       Paste it into $Config.ClientId in this script.'
-        Write-Host ''
-        Write-Host '  4. Left menu → Authentication'
-        Write-Host '       → Add a platform → Mobile and desktop applications'
-        Write-Host '       → Check: https://login.microsoftonline.com/common/oauth2/nativeclient'
-        Write-Host '       → Advanced settings → Allow public client flows = Yes'
-        Write-Host '       → [ Save ]'
-        Write-Host ''
-        Write-Host '  5. Left menu → API permissions'
-        Write-Host '       → Add a permission → Microsoft Graph → Delegated'
-        Write-Host '       → Search "Files.ReadWrite" → check it → Add permissions'
-        Write-Host ''
-        $step++
+function Load-LocalConfig {
+    if (Test-Path $LocalConfigPath) {
+        try {
+            $raw = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
+            if ($raw.ClientId -and $raw.CalendarificApiKey) {
+                return @{ ClientId = $raw.ClientId; CalendarificApiKey = $raw.CalendarificApiKey }
+            }
+        } catch {}
     }
-
-    if ('CalendarificApiKey' -in $Missing) {
-        Write-Host "  STEP $step — Get a Free Calendarific API Key" -ForegroundColor Green
-        Write-Host ('  ' + '─' * 55)
-        Write-Host '  Provides Hindu festival dates for all years.'
-        Write-Host '  Free tier: 1,000 API calls/month. This script uses ~30 calls total.'
-        Write-Host ''
-        Write-Host '  1. Open: https://calendarific.com/sign-up' -ForegroundColor Cyan
-        Write-Host '  2. Create a free account and verify your email.'
-        Write-Host '  3. After login, go to your Dashboard.'
-        Write-Host '  4. Copy the API Key shown on the dashboard.'
-        Write-Host '       Paste it into $Config.CalendarificApiKey in this script.'
-        Write-Host ''
-    }
-
-    Write-Host '  After updating the config, re-run:  .\FestivalAlbums.ps1' -ForegroundColor Yellow
-    Write-Host "$bar`n" -ForegroundColor Cyan
-    exit 0
+    return $null
 }
 
-# Validate config before doing anything else
-$missingConfig = @()
-if ([string]::IsNullOrWhiteSpace($Config.ClientId))           { $missingConfig += 'ClientId' }
-if ([string]::IsNullOrWhiteSpace($Config.CalendarificApiKey)) { $missingConfig += 'CalendarificApiKey' }
-if ($missingConfig.Count -gt 0) { Show-SetupGuide -Missing $missingConfig }
+function Save-LocalConfig {
+    param([string]$ClientId, [string]$CalendarificApiKey)
+    $dir = Split-Path $LocalConfigPath
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    @{ ClientId = $ClientId; CalendarificApiKey = $CalendarificApiKey } |
+        ConvertTo-Json | Set-Content -Path $LocalConfigPath -Encoding UTF8
+}
+
+function Show-CredentialsDialog {
+    param([string]$CurrentClientId = '', [string]$CurrentApiKey = '')
+
+    $form = [System.Windows.Forms.Form]@{
+        Text            = 'Festival Albums — First Time Setup'
+        Size            = [System.Drawing.Size]::new(520, 420)
+        StartPosition   = 'CenterScreen'
+        FormBorderStyle = 'FixedDialog'
+        MaximizeBox     = $false
+        MinimizeBox     = $false
+        BackColor       = [System.Drawing.Color]::WhiteSmoke
+    }
+
+    # ── Header ──
+    $header = [System.Windows.Forms.Label]@{
+        Text      = '🪔  Festival Albums for OneDrive'
+        Location  = [System.Drawing.Point]::new(20, 15)
+        Size      = [System.Drawing.Size]::new(470, 28)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
+        ForeColor = [System.Drawing.Color]::DarkSlateBlue
+    }
+
+    $subHeader = [System.Windows.Forms.Label]@{
+        Text      = 'Two one-time setup values are needed. Links below guide you through each.'
+        Location  = [System.Drawing.Point]::new(20, 45)
+        Size      = [System.Drawing.Size]::new(470, 20)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 9)
+        ForeColor = [System.Drawing.Color]::DimGray
+    }
+
+    # ── Client ID ──
+    $lblClient = [System.Windows.Forms.Label]@{
+        Text     = 'Azure App Client ID'
+        Location = [System.Drawing.Point]::new(20, 90)
+        Size     = [System.Drawing.Size]::new(200, 20)
+        Font     = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    }
+
+    $linkClient = [System.Windows.Forms.LinkLabel]@{
+        Text     = 'How to get this →'
+        Location = [System.Drawing.Point]::new(230, 90)
+        Size     = [System.Drawing.Size]::new(250, 20)
+        Font     = [System.Drawing.Font]::new('Segoe UI', 9)
+    }
+    $linkClient.add_LinkClicked({ Start-Process 'https://aka.ms/AppRegistrations' })
+
+    $txtClient = [System.Windows.Forms.TextBox]@{
+        Location    = [System.Drawing.Point]::new(20, 114)
+        Size        = [System.Drawing.Size]::new(460, 26)
+        Font        = [System.Drawing.Font]::new('Consolas', 10)
+        Text        = $CurrentClientId
+        PlaceholderText = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+    }
+
+    $noteClient = [System.Windows.Forms.Label]@{
+        Text      = 'Register a free app at portal.azure.com → App Registrations (Personal accounts only, Files.ReadWrite permission, public client flow enabled).'
+        Location  = [System.Drawing.Point]::new(20, 145)
+        Size      = [System.Drawing.Size]::new(460, 36)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
+        ForeColor = [System.Drawing.Color]::Gray
+    }
+
+    # ── Calendarific API Key ──
+    $lblApi = [System.Windows.Forms.Label]@{
+        Text     = 'Calendarific API Key'
+        Location = [System.Drawing.Point]::new(20, 200)
+        Size     = [System.Drawing.Size]::new(200, 20)
+        Font     = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    }
+
+    $linkApi = [System.Windows.Forms.LinkLabel]@{
+        Text     = 'Get a free key →'
+        Location = [System.Drawing.Point]::new(230, 200)
+        Size     = [System.Drawing.Size]::new(250, 20)
+        Font     = [System.Drawing.Font]::new('Segoe UI', 9)
+    }
+    $linkApi.add_LinkClicked({ Start-Process 'https://calendarific.com/sign-up' })
+
+    $txtApi = [System.Windows.Forms.TextBox]@{
+        Location        = [System.Drawing.Point]::new(20, 224)
+        Size            = [System.Drawing.Size]::new(460, 26)
+        Font            = [System.Drawing.Font]::new('Consolas', 10)
+        Text            = $CurrentApiKey
+        PlaceholderText = 'Your Calendarific API key'
+    }
+
+    $noteApi = [System.Windows.Forms.Label]@{
+        Text      = 'Free tier gives 1,000 calls/month. This script uses ~30 calls total per run.'
+        Location  = [System.Drawing.Point]::new(20, 255)
+        Size      = [System.Drawing.Size]::new(460, 20)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
+        ForeColor = [System.Drawing.Color]::Gray
+    }
+
+    # ── Buttons ──
+    $btnOk = [System.Windows.Forms.Button]@{
+        Text         = 'Save && Continue'
+        Location     = [System.Drawing.Point]::new(310, 330)
+        Size         = [System.Drawing.Size]::new(160, 36)
+        BackColor    = [System.Drawing.Color]::DarkSlateBlue
+        ForeColor    = [System.Drawing.Color]::White
+        FlatStyle    = 'Flat'
+        Font         = [System.Drawing.Font]::new('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+        DialogResult = 'OK'
+    }
+
+    $btnCancel = [System.Windows.Forms.Button]@{
+        Text         = 'Cancel'
+        Location     = [System.Drawing.Point]::new(220, 330)
+        Size         = [System.Drawing.Size]::new(80, 36)
+        FlatStyle    = 'Flat'
+        Font         = [System.Drawing.Font]::new('Segoe UI', 10)
+        DialogResult = 'Cancel'
+    }
+
+    $note = [System.Windows.Forms.Label]@{
+        Text      = '🔒 Saved to %APPDATA%\FestivalAlbums\config.json — never sent anywhere.'
+        Location  = [System.Drawing.Point]::new(20, 340)
+        Size      = [System.Drawing.Size]::new(360, 20)
+        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
+        ForeColor = [System.Drawing.Color]::DimGray
+    }
+
+    $form.AcceptButton = $btnOk
+    $form.CancelButton = $btnCancel
+    $form.Controls.AddRange(@(
+        $header, $subHeader,
+        $lblClient, $linkClient, $txtClient, $noteClient,
+        $lblApi,    $linkApi,    $txtApi,    $noteApi,
+        $btnOk, $btnCancel, $note
+    ))
+
+    $result = $form.ShowDialog()
+
+    if ($result -ne 'OK') {
+        Write-Host '[Setup] Cancelled.' -ForegroundColor Yellow
+        exit 0
+    }
+
+    $clientId = $txtClient.Text.Trim()
+    $apiKey   = $txtApi.Text.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($apiKey)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'Both fields are required. Please fill in the Client ID and API Key.',
+            'Missing Values',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return Show-CredentialsDialog -CurrentClientId $clientId -CurrentApiKey $apiKey
+    }
+
+    Save-LocalConfig -ClientId $clientId -CalendarificApiKey $apiKey
+    Write-Host '[Setup] Credentials saved.' -ForegroundColor Green
+    return @{ ClientId = $clientId; CalendarificApiKey = $apiKey }
+}
+
+# Load saved credentials or show popup
+$localCreds = Load-LocalConfig
+if (-not $localCreds) {
+    Write-Host '[Setup] No saved credentials found — opening setup dialog...' -ForegroundColor Yellow
+    $localCreds = Show-CredentialsDialog
+}
+
+$Config.ClientId           = $localCreds.ClientId
+$Config.CalendarificApiKey = $localCreds.CalendarificApiKey
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  AUTHENTICATION  — Microsoft Graph Device Code Flow
+#  AUTHENTICATION  — Microsoft Graph Authorization Code Flow (browser popup)
+#  Opens the Microsoft login page in the default browser. A local HTTP listener
+#  on localhost catches the OAuth redirect and extracts the auth code.
+#  No credentials are typed into the terminal.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-$script:AccessToken = $null
-$script:TokenExpiry = [DateTime]::MinValue
+$script:AccessToken  = $null
+$script:RefreshToken = $null
+$script:TokenExpiry  = [DateTime]::MinValue
+
+# Fixed redirect URI — must also be registered in your Azure app:
+#   Authentication → Add platform → Web → http://localhost:8765/
+$OAuthRedirectUri = 'http://localhost:8765/'
+$OAuthScope       = 'https://graph.microsoft.com/Files.ReadWrite offline_access'
 
 function Get-AccessToken {
-    Write-Host '[Auth] Requesting device code...' -ForegroundColor Cyan
+    Write-Host '[Auth] Opening Microsoft sign-in in your browser...' -ForegroundColor Cyan
 
-    $deviceCode = Invoke-RestMethod -Method POST `
-        -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode' `
+    # Build the authorization URL
+    $state   = [System.Guid]::NewGuid().ToString('N')
+    $authUrl = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize" +
+               "?client_id=$($Config.ClientId)" +
+               "&response_type=code" +
+               "&redirect_uri=$([Uri]::EscapeDataString($OAuthRedirectUri))" +
+               "&scope=$([Uri]::EscapeDataString($OAuthScope))" +
+               "&state=$state" +
+               "&prompt=select_account"
+
+    # Start local HTTP listener BEFORE opening browser
+    $listener = [System.Net.HttpListener]::new()
+    $listener.Prefixes.Add($OAuthRedirectUri)
+    try { $listener.Start() }
+    catch {
+        Write-Error "[Auth] Cannot start local listener on $OAuthRedirectUri. Port 8765 may be in use."
+        return
+    }
+
+    # Open browser
+    Start-Process $authUrl
+
+    Write-Host '[Auth] Waiting for sign-in to complete in browser...' -ForegroundColor Gray
+
+    # Wait for the redirect (60-second timeout)
+    $contextTask = $listener.GetContextAsync()
+    $waited      = 0
+    while (-not $contextTask.IsCompleted -and $waited -lt 120) {
+        Start-Sleep -Milliseconds 500
+        $waited++
+    }
+
+    $listener.Stop()
+
+    if (-not $contextTask.IsCompleted) {
+        Write-Error '[Auth] Timed out waiting for browser sign-in. Please re-run the script.'
+        return
+    }
+
+    $context  = $contextTask.Result
+    $rawUrl   = $context.Request.Url.ToString()
+
+    # Send a friendly close page to the browser
+    $html     = '<html><body style="font-family:Segoe UI;text-align:center;margin-top:80px">' +
+                '<h2>&#10003; Signed in successfully!</h2>' +
+                '<p>You can close this tab and return to the terminal.</p></body></html>'
+    $bytes    = [System.Text.Encoding]::UTF8.GetBytes($html)
+    $context.Response.ContentType   = 'text/html; charset=utf-8'
+    $context.Response.ContentLength64 = $bytes.Length
+    $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $context.Response.Close()
+
+    # Parse query string from redirect URL
+    $query = [System.Web.HttpUtility]::ParseQueryString(([Uri]$rawUrl).Query)
+
+    if ($query['error']) {
+        Write-Error "[Auth] Sign-in error: $($query['error_description'])"
+        return
+    }
+
+    $returnedState = $query['state']
+    if ($returnedState -ne $state) {
+        Write-Error '[Auth] State mismatch — possible CSRF. Aborting.'
+        return
+    }
+
+    $code = $query['code']
+    if (-not $code) {
+        Write-Error '[Auth] No authorization code returned. Please try again.'
+        return
+    }
+
+    # Exchange auth code for tokens
+    $token = Invoke-RestMethod -Method POST `
+        -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token' `
         -ContentType 'application/x-www-form-urlencoded' `
         -Body @{
-            client_id = $Config.ClientId
-            scope     = 'https://graph.microsoft.com/Files.ReadWrite offline_access'
+            client_id    = $Config.ClientId
+            grant_type   = 'authorization_code'
+            code         = $code
+            redirect_uri = $OAuthRedirectUri
+            scope        = $OAuthScope
         }
 
-    $bar = '═' * 62
-    Write-Host "`n$bar" -ForegroundColor Yellow
-    Write-Host '  ACTION REQUIRED — Sign in to Microsoft' -ForegroundColor Yellow
-    Write-Host "$bar" -ForegroundColor Yellow
-    Write-Host ''
-    Write-Host '  1. Open this URL in your browser:'
-    Write-Host "       $($deviceCode.verification_uri)" -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host '  2. Enter this code when prompted:'
-    Write-Host "       $($deviceCode.user_code)" -ForegroundColor Green
-    Write-Host ''
-    Write-Host '  Waiting for sign-in...' -ForegroundColor Gray
+    $script:AccessToken  = $token.access_token
+    $script:RefreshToken = $token.refresh_token
+    $script:TokenExpiry  = (Get-Date).AddSeconds([int]$token.expires_in - 60)
 
-    $interval  = [int]$deviceCode.interval
-    $expiresIn = [int]$deviceCode.expires_in
-    $elapsed   = 0
+    Write-Host '[Auth] Signed in to OneDrive successfully.' -ForegroundColor Green
+}
 
-    while ($elapsed -lt $expiresIn) {
-        Start-Sleep -Seconds $interval
-        $elapsed += $interval
-        try {
-            $token = Invoke-RestMethod -Method POST `
-                -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token' `
-                -ContentType 'application/x-www-form-urlencoded' `
-                -Body @{
-                    client_id   = $Config.ClientId
-                    grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
-                    device_code = $deviceCode.device_code
-                }
-            $script:AccessToken = $token.access_token
-            $script:TokenExpiry = (Get-Date).AddSeconds([int]$token.expires_in - 60)
-            Write-Host '[Auth] Signed in successfully.' -ForegroundColor Green
-            return
+function Refresh-AccessToken {
+    Write-Host '[Auth] Refreshing access token...' -ForegroundColor Gray
+    $token = Invoke-RestMethod -Method POST `
+        -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token' `
+        -ContentType 'application/x-www-form-urlencoded' `
+        -Body @{
+            client_id     = $Config.ClientId
+            grant_type    = 'refresh_token'
+            refresh_token = $script:RefreshToken
+            scope         = $OAuthScope
         }
-        catch {
-            $err = $null
-            try { $err = ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch {}
-            if ($err -eq 'authorization_pending') { continue }
-            if ($err -eq 'expired_token') { Write-Error '[Auth] Code expired. Re-run the script.'; return }
-            throw
-        }
-    }
-    Write-Error '[Auth] Timed out waiting for sign-in.'
+    $script:AccessToken  = $token.access_token
+    $script:RefreshToken = $token.refresh_token
+    $script:TokenExpiry  = (Get-Date).AddSeconds([int]$token.expires_in - 60)
+    Write-Host '[Auth] Token refreshed.' -ForegroundColor Gray
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -225,10 +417,10 @@ function Invoke-Graph {
         [hashtable]$Body
     )
 
-    # Re-authenticate if token is close to expiry
+    # Silently refresh token if close to expiry (no browser popup needed)
     if ((Get-Date) -ge $script:TokenExpiry) {
-        Write-Host '[Auth] Token expired, re-authenticating...' -ForegroundColor Yellow
-        Get-AccessToken
+        if ($script:RefreshToken) { Refresh-AccessToken }
+        else                      { Get-AccessToken }
     }
 
     $params = @{

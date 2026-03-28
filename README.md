@@ -16,20 +16,36 @@ Progress is saved to OneDrive after every step. The script can be interrupted an
 
 ## First-time setup
 
-Run the script with an empty config and it will guide you through two setup steps:
+Run the script — a setup dialog will appear automatically if credentials are not saved yet:
 
 ```powershell
 .\FestivalAlbums.ps1
 ```
 
 **Step 1 — Azure App Registration** (~3 minutes, free)
-- Go to https://aka.ms/AppRegistrations
-- Register an app for personal Microsoft accounts
-- Copy the Client ID into `$Config.ClientId`
+
+1. Go to https://aka.ms/AppRegistrations (the link is also in the popup)
+2. Click **+ New registration**
+   - Name: `Festival Photo Albums`
+   - Supported account types: **Personal Microsoft accounts only**
+   - Click **Register**
+3. Copy the **Application (client) ID** and paste it into the popup dialog
+4. Left menu → **Authentication**
+   - Add a platform → **Web**
+   - Redirect URI: `http://localhost:8765/`
+   - Click **Save**
+5. Left menu → **API permissions**
+   - Add a permission → Microsoft Graph → Delegated → `Files.ReadWrite`
 
 **Step 2 — Calendarific API Key** (free tier: 1,000 calls/month)
-- Go to https://calendarific.com/sign-up
-- Copy the API key into `$Config.CalendarificApiKey`
+
+1. Go to https://calendarific.com/sign-up (the link is also in the popup)
+2. Create a free account and copy your API key from the dashboard
+3. Paste it into the popup dialog
+
+Credentials are saved to `%APPDATA%\FestivalAlbums\config.json` — the popup only appears once.
+
+**Sign-in flow:** After entering credentials, clicking **Save & Continue** opens the Microsoft sign-in page in your default browser. Sign in there, and the script continues automatically — no codes to copy, no terminal input required.
 
 ---
 

@@ -136,7 +136,7 @@ function Invoke-Graph {
         $params.Body        = ($Body | ConvertTo-Json -Depth 10)
     }
 
-    return Invoke-MgGraphRequest @params
+    return Invoke-MgGraphRequest @params -OutputType PSObject
 }
 
 function Load-OneDriveSettings {
@@ -317,24 +317,13 @@ function Show-ApiKeyDialog {
 function Read-OneDriveJson {
     param([string]$RelativePath)
     try {
-        $bytes = Invoke-MgGraphRequest -Method GET `
+        return Invoke-MgGraphRequest -Method GET `
             -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content" `
-            -OutputType HttpResponseMessage
-        # SDK returns HttpResponseMessage — read content as string then parse
-        $json = $bytes.Content.ReadAsStringAsync().Result
-        return $json | ConvertFrom-Json
+            -OutputType PSObject
     }
     catch {
-        $status = $_.Exception.Response.StatusCode.value__
-        if ($status -eq 404) { return $null }
-        # Fallback: try as raw response
-        try {
-            return Invoke-MgGraphRequest -Method GET `
-                -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content"
-        } catch {
-            if ($_.Exception.Message -match '404|itemNotFound') { return $null }
-            throw
-        }
+        if ($_.Exception.Message -match '404|itemNotFound') { return $null }
+        throw
     }
 }
 

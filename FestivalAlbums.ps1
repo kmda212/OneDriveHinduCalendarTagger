@@ -55,8 +55,9 @@ $Config = @{
     StateFolder        = 'Apps/FestivalTimeline'
 
     # ── Festivals to create albums for ───────────────────────────────────────
-    # Names must match Calendarific API holiday names for country=IN exactly.
-    # Add or remove lines freely before running.
+    # This list is used only if festivals_config.json does not exist.
+    # Run Get-HinduFestivals.ps1 to generate festivals_config.json with
+    # your own selection — that file takes priority over this list.
     FestivalsToTrack   = @(
         'Diwali'
         'Holi'
@@ -68,6 +69,23 @@ $Config = @{
         'Makar Sankranti'
         'Maha Shivaratri'
     )
+}
+
+# Load festival selection from festivals_config.json if present (overrides built-in list)
+$FestivalsConfigPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'festivals_config.json'
+if (Test-Path $FestivalsConfigPath) {
+    try {
+        $fc = Get-Content $FestivalsConfigPath -Raw | ConvertFrom-Json
+        if ($fc.FestivalsToTrack -and $fc.FestivalsToTrack.Count -gt 0) {
+            $Config.FestivalsToTrack = @($fc.FestivalsToTrack)
+            Write-Host "[Config] Loaded $($Config.FestivalsToTrack.Count) festivals from festivals_config.json" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "[Config] Could not read festivals_config.json — using built-in list."
+    }
+} else {
+    Write-Host "[Config] No festivals_config.json found — using built-in FestivalsToTrack list." -ForegroundColor Gray
+    Write-Host "         Tip: run Get-HinduFestivals.ps1 to build your own selection." -ForegroundColor Gray
 }
 
 # Local path — stores only the Azure App ClientId (not the API key)

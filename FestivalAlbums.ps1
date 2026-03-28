@@ -551,7 +551,8 @@ function Invoke-PhotoScan {
         $photoMap[$k] = [System.Collections.Generic.List[string]]($State.photo_scan.festival_photo_map[$k])
     }
 
-    $scanned      = [int]$State.photo_scan.total_scanned
+    $scanned          = [int]$State.photo_scan.total_scanned
+    $script:ExifCount = 0   # tracks how many photos had real EXIF takenDateTime
     $resumeExtIdx = [int]$State.photo_scan.extension_index
     $resumeLink   = $State.photo_scan.next_link
 
@@ -574,12 +575,14 @@ function Invoke-PhotoScan {
             foreach ($item in $page.value) {
                 if (-not $item.file) { continue }  # skip folders
 
-                # Prefer EXIF capture date, fall back to file creation date
-                $rawDate = if ($item.photo -and $item.photo.takenDateTime) {
-                    $item.photo.takenDateTime
-                } else {
-                    $item.createdDateTime
-                }
+                # Prefer EXIF capture date (photo facet), fall back to file creation date.
+                # Safe null-chain: .photo is absent on non-JPEG files, chaining onto
+                # $null throws in strict mode, so we guard with PSObject.Properties.
+                $takenDateTime = if ($item.photo -ne $null) {
+                    $item.photo.PSObject.Properties['takenDateTime']?.Value
+                } else { $null }
+                $rawDate = if ($takenDateTime) { $takenDateTime } else { $item.createdDateTime }
+                if ($takenDateTime) { $script:ExifCount++ }
 
                 $dateKey = try { ([DateTime]::Parse($rawDate)).ToString('yyyy-MM-dd') } catch { $null }
 
@@ -621,7 +624,8 @@ function Invoke-PhotoScan {
     }
 
     Write-Progress -Activity 'Scanning OneDrive photos' -Completed
-    Write-Host "[Scan] Complete. Total files scanned: $scanned" -ForegroundColor Green
+    $fallbackCount = $scanned - $script:ExifCount
+    Write-Host "[Scan] Complete. Total files scanned: $scanned  |  EXIF date used: $($script:ExifCount)  |  Fallback to created date: $fallbackCount" -ForegroundColor Green
     foreach ($festival in ($photoMap.Keys | Sort-Object)) {
         Write-Host "  $festival`: $($photoMap[$festival].Count) photo(s)" -ForegroundColor Gray
     }

@@ -96,7 +96,7 @@ $LocalConfigPath = "$env:APPDATA\FestivalAlbums\config.json"
 $OneDriveSettingsPath = "$($Config.StateFolder)/settings.json"
 
 # Album name = festival name + this suffix  (e.g. "DiwaliLifetime")
-$AlbumSuffix = 'Lifetime'
+$AlbumSuffix = 'Over the years'
 
 # Image file extensions to scan
 $ImageExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff')
@@ -863,7 +863,7 @@ function Invoke-PhotoScan {
 function Get-OrCreate-Album {
     param([string]$FestivalName, [hashtable]$State)
 
-    $albumName = "$FestivalName$AlbumSuffix"
+    $albumName = "$FestivalName $AlbumSuffix"
 
     # Fastest path: already tracked in state
     if ($State.albums.ContainsKey($FestivalName)) {
@@ -910,7 +910,7 @@ function Add-PhotosToAlbum {
         [hashtable]$State
     )
 
-    $albumName = "$FestivalName$AlbumSuffix"
+    $albumName = "$FestivalName $AlbumSuffix"
     Write-Host "`n[Add] Adding photos to '$albumName'..." -ForegroundColor Cyan
 
     # Build a hash set of already-added IDs for O(1) skip lookup
@@ -1068,7 +1068,7 @@ if ($DryRun) {
     Write-Host ''
     foreach ($festival in $festivalsWithPhotos) {
         $count = @($photoMap[$festival]).Count
-        Write-Host ("    {0,-30} {1,4} photo(s) → {2}Lifetime" -f $festival, $count, $festival) -ForegroundColor Gray
+        Write-Host ("    {0,-30} {1,4} photo(s) → {2} {3}" -f $festival, $count, $festival, $AlbumSuffix) -ForegroundColor Gray
     }
     Write-Host ''
     Write-Host '  To apply these changes, run:  .\FestivalAlbums.ps1' -ForegroundColor Yellow

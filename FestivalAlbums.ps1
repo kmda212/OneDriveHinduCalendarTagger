@@ -21,7 +21,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$Rescan
+    [switch]$Rescan,
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
@@ -661,6 +662,10 @@ function Load-State {
 
 function Save-State {
     param([hashtable]$State)
+    if ($DryRun) {
+        Write-Host '[State] DryRun — state not saved.' -ForegroundColor DarkGray
+        return
+    }
     $State.last_run = (Get-Date -Format 'o')
     Write-OneDriveJson -RelativePath $StatePath -Data $State
     Write-Host '[State] Progress saved to OneDrive.' -ForegroundColor Gray
@@ -882,6 +887,10 @@ function Get-OrCreate-Album {
     }
 
     # Create a new album
+    if ($DryRun) {
+        Write-Host "[DryRun] Would create album '$albumName'" -ForegroundColor DarkYellow
+        return 'dry-run-album-id'
+    }
     Write-Host "[Album] Creating new album '$albumName'..." -ForegroundColor Cyan
     $newAlbum = Invoke-Graph -Method POST -Uri "$GraphBase/me/drive/bundles" -Body @{
         name                                = $albumName
@@ -926,6 +935,12 @@ function Add-PhotosToAlbum {
         }
 
         try {
+            # DryRun: skip the actual Graph API write, just count
+            if ($DryRun) {
+                $added++
+                continue
+            }
+
             # Add photo to album by reference — photo stays in its original location
             Invoke-Graph -Method POST `
                 -Uri "$GraphBase/me/drive/bundles/$AlbumId/children" `
@@ -970,6 +985,9 @@ Write-Host "$bar" -ForegroundColor Cyan
 Write-Host ''
 if ($Rescan) {
     Write-Host '  Mode: FULL RESCAN (ignoring previous scan progress)' -ForegroundColor Yellow
+} elseif ($DryRun) {
+    Write-Host '  Mode: DRY RUN — no albums created, no photos added, no state saved' -ForegroundColor Magenta
+    Write-Host '         API key WILL be saved to OneDrive if not already present.' -ForegroundColor DarkGray
 } else {
     Write-Host '  Mode: Resume from last checkpoint' -ForegroundColor Green
 }
@@ -988,7 +1006,10 @@ $apiKey = Load-OneDriveSettings
 if (-not $apiKey) {
     Write-Host '[Settings] API key not found in OneDrive — opening dialog...' -ForegroundColor Yellow
     $apiKey = Show-ApiKeyDialog
+    # Always save the key to OneDrive — even in DryRun (this is the one write DryRun allows)
     Save-OneDriveSettings -ApiKey $apiKey
+} else {
+    Write-Host '[Settings] API key found in OneDrive.' -ForegroundColor Green
 }
 $Config.CalendarificApiKey = $apiKey
 
@@ -1029,11 +1050,32 @@ if ($festivalsWithPhotos.Count -eq 0) {
 }
 
 # ── Mark run complete ──────────────────────────────────────────────────────
-$state.completed_phases = @($state.completed_phases) + 'done'
-$state.current_phase    = 'complete'
-Save-State -State $state
+if (-not $DryRun) {
+    $state.completed_phases = @($state.completed_phases) + 'done'
+    $state.current_phase    = 'complete'
+    Save-State -State $state
+}
 
-Write-Host "`n$bar" -ForegroundColor Green
-Write-Host '  All done! Your festival albums have been updated.' -ForegroundColor Green
-Write-Host '  Open OneDrive → Photos → Albums to see them.' -ForegroundColor Green
-Write-Host "$bar`n" -ForegroundColor Green
+if ($DryRun) {
+    $totalPhotos = ($festivalsWithPhotos | ForEach-Object { @($photoMap[$_]).Count } | Measure-Object -Sum).Sum
+    Write-Host "`n$bar" -ForegroundColor Magenta
+    Write-Host '  DRY RUN COMPLETE — nothing was changed in OneDrive.' -ForegroundColor Magenta
+    Write-Host "$bar" -ForegroundColor Magenta
+    Write-Host ''
+    Write-Host '  What WOULD have happened:' -ForegroundColor White
+    Write-Host "    Albums to create/reuse : $($festivalsWithPhotos.Count)" -ForegroundColor White
+    Write-Host "    Photos to add (total)  : $totalPhotos" -ForegroundColor White
+    Write-Host ''
+    foreach ($festival in $festivalsWithPhotos) {
+        $count = @($photoMap[$festival]).Count
+        Write-Host ("    {0,-30} {1,4} photo(s) → {2}Lifetime" -f $festival, $count, $festival) -ForegroundColor Gray
+    }
+    Write-Host ''
+    Write-Host '  To apply these changes, run:  .\FestivalAlbums.ps1' -ForegroundColor Yellow
+    Write-Host "$bar`n" -ForegroundColor Magenta
+} else {
+    Write-Host "`n$bar" -ForegroundColor Green
+    Write-Host '  All done! Your festival albums have been updated.' -ForegroundColor Green
+    Write-Host '  Open OneDrive → Photos → Albums to see them.' -ForegroundColor Green
+    Write-Host "$bar`n" -ForegroundColor Green
+}

@@ -33,8 +33,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Required for HttpUtility.ParseQueryString (OAuth redirect parsing)
-Add-Type -AssemblyName System.Web
+# ── Ensure Microsoft Graph SDK modules are available ──────────────────────────
+foreach ($mod in @('Microsoft.Graph.Authentication', 'Microsoft.Graph.Files')) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "[Setup] Installing $mod..." -ForegroundColor Yellow
+        Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+    }
+}
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION  — Credentials are collected via popup on first run and saved
@@ -43,9 +49,9 @@ Add-Type -AssemblyName System.Web
 
 $Config = @{
 
-    # ClientId is the only value stored locally (%APPDATA%\FestivalAlbums\config.json).
-    # The Calendarific API key is stored securely in OneDrive (Apps/FestivalTimeline/settings.json)
-    # and is loaded after sign-in. Neither value is stored in this script.
+    # Authentication is handled by Connect-MgGraph (Microsoft Graph PowerShell SDK).
+    # No ClientId registration required — the SDK's built-in app is used.
+    # The Calendarific API key is stored securely in OneDrive after first entry.
 
     # How many past years to scan for festival photos.
     YearsToScan        = 30
@@ -80,13 +86,10 @@ $Config = @{
 # OneDrive path for the festival selection (loaded after auth)
 $OneDriveFestivalsConfigPath = "$($Config.StateFolder)/festivals_config.json"
 
-# Local path — stores only the Azure App ClientId (not the API key)
-$LocalConfigPath = "$env:APPDATA\FestivalAlbums\config.json"
-
 # OneDrive path — stores the Calendarific API key (never in git, never on disk)
 $OneDriveSettingsPath = "$($Config.StateFolder)/settings.json"
 
-# Album name = festival name + this suffix  (e.g. "DiwaliLifetime")
+# Album name = festival name + this suffix  (e.g. "Diwali Over the years")
 $AlbumSuffix = 'Over the years'
 
 # Image file extensions to scan
@@ -96,151 +99,45 @@ $ImageExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff')
 $GraphBase = 'https://graph.microsoft.com/v1.0'
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  LOCAL CONFIG  — Stores only the Azure App ClientId on this machine.
-#  The Calendarific API key is stored in OneDrive instead (see below).
+#  AUTHENTICATION  — Microsoft Graph PowerShell SDK
+#  Connect-MgGraph opens a browser sign-in page automatically.
+#  Token refresh is handled by the SDK — no manual token management needed.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-function Load-LocalConfig {
-    if (Test-Path $LocalConfigPath) {
-        try {
-            $raw = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
-            if ($raw.ClientId) { return @{ ClientId = $raw.ClientId } }
-        } catch {}
+function Connect-ToOneDrive {
+    Write-Host '[Auth] Connecting to OneDrive via Microsoft Graph...' -ForegroundColor Cyan
+    try {
+        Connect-MgGraph -Scopes 'Files.ReadWrite' -NoWelcome -ErrorAction Stop
+        Write-Host '[Auth] Signed in to OneDrive successfully.' -ForegroundColor Green
+    } catch {
+        Write-Error "[Auth] Sign-in failed: $_"
+        exit 1
     }
-    return $null
-}
-
-function Save-LocalConfig {
-    param([string]$ClientId)
-    $dir = Split-Path $LocalConfigPath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-    @{ ClientId = $ClientId } | ConvertTo-Json | Set-Content -Path $LocalConfigPath -Encoding UTF8
-}
-
-function Show-ClientIdDialog {
-    param([string]$Current = '')
-
-    $form = [System.Windows.Forms.Form]@{
-        Text            = 'Festival Albums — Azure App Setup'
-        Size            = [System.Drawing.Size]::new(520, 310)
-        StartPosition   = 'CenterScreen'
-        FormBorderStyle = 'FixedDialog'
-        MaximizeBox     = $false
-        MinimizeBox     = $false
-        BackColor       = [System.Drawing.Color]::WhiteSmoke
-    }
-
-    $header = [System.Windows.Forms.Label]@{
-        Text      = '🪔  Festival Albums for OneDrive'
-        Location  = [System.Drawing.Point]::new(20, 15)
-        Size      = [System.Drawing.Size]::new(470, 28)
-        Font      = [System.Drawing.Font]::new('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
-        ForeColor = [System.Drawing.Color]::DarkSlateBlue
-    }
-
-    $sub = [System.Windows.Forms.Label]@{
-        Text      = 'Enter your Azure App Client ID to allow this script to access your OneDrive.'
-        Location  = [System.Drawing.Point]::new(20, 47)
-        Size      = [System.Drawing.Size]::new(470, 20)
-        Font      = [System.Drawing.Font]::new('Segoe UI', 9)
-        ForeColor = [System.Drawing.Color]::DimGray
-    }
-
-    $lbl = [System.Windows.Forms.Label]@{
-        Text     = 'Azure App Client ID'
-        Location = [System.Drawing.Point]::new(20, 90)
-        Size     = [System.Drawing.Size]::new(200, 20)
-        Font     = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    }
-
-    $link = [System.Windows.Forms.LinkLabel]@{
-        Text     = 'How to register a free app →'
-        Location = [System.Drawing.Point]::new(230, 90)
-        Size     = [System.Drawing.Size]::new(260, 20)
-        Font     = [System.Drawing.Font]::new('Segoe UI', 9)
-    }
-    $link.add_LinkClicked({ Start-Process 'https://aka.ms/AppRegistrations' })
-
-    $txt = [System.Windows.Forms.TextBox]@{
-        Location        = [System.Drawing.Point]::new(20, 114)
-        Size            = [System.Drawing.Size]::new(460, 26)
-        Font            = [System.Drawing.Font]::new('Consolas', 10)
-        Text            = $Current
-        PlaceholderText = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
-    }
-
-    $note = [System.Windows.Forms.Label]@{
-        Text      = 'Register at portal.azure.com → App Registrations. Personal accounts only.' +
-                    ' Add redirect URI http://localhost:8765/ and Files.ReadWrite permission.'
-        Location  = [System.Drawing.Point]::new(20, 146)
-        Size      = [System.Drawing.Size]::new(460, 36)
-        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
-        ForeColor = [System.Drawing.Color]::Gray
-    }
-
-    $btnOk = [System.Windows.Forms.Button]@{
-        Text         = 'Save && Continue'
-        Location     = [System.Drawing.Point]::new(320, 224)
-        Size         = [System.Drawing.Size]::new(155, 36)
-        BackColor    = [System.Drawing.Color]::DarkSlateBlue
-        ForeColor    = [System.Drawing.Color]::White
-        FlatStyle    = 'Flat'
-        Font         = [System.Drawing.Font]::new('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-        DialogResult = 'OK'
-    }
-
-    $btnCancel = [System.Windows.Forms.Button]@{
-        Text         = 'Cancel'
-        Location     = [System.Drawing.Point]::new(230, 224)
-        Size         = [System.Drawing.Size]::new(80, 36)
-        FlatStyle    = 'Flat'
-        Font         = [System.Drawing.Font]::new('Segoe UI', 10)
-        DialogResult = 'Cancel'
-    }
-
-    $savNote = [System.Windows.Forms.Label]@{
-        Text      = '🔒 Saved locally to %APPDATA%\FestivalAlbums\config.json'
-        Location  = [System.Drawing.Point]::new(20, 234)
-        Size      = [System.Drawing.Size]::new(360, 20)
-        Font      = [System.Drawing.Font]::new('Segoe UI', 8)
-        ForeColor = [System.Drawing.Color]::DimGray
-    }
-
-    $form.AcceptButton = $btnOk
-    $form.CancelButton = $btnCancel
-    $form.Controls.AddRange(@($header, $sub, $lbl, $link, $txt, $note, $btnOk, $btnCancel, $savNote))
-
-    if ($form.ShowDialog() -ne 'OK') { Write-Host '[Setup] Cancelled.'; exit 0 }
-
-    $clientId = $txt.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($clientId)) {
-        [System.Windows.Forms.MessageBox]::Show('Client ID is required.', 'Missing Value',
-            'OK', 'Warning') | Out-Null
-        return Show-ClientIdDialog -Current $clientId
-    }
-
-    Save-LocalConfig -ClientId $clientId
-    Write-Host '[Setup] Client ID saved locally.' -ForegroundColor Green
-    return $clientId
-}
-
-# Load or prompt for ClientId
-$localCreds = Load-LocalConfig
-if (-not $localCreds) {
-    Write-Host '[Setup] No Client ID found — opening setup dialog...' -ForegroundColor Yellow
-    $Config.ClientId = Show-ClientIdDialog
-} else {
-    $Config.ClientId = $localCreds.ClientId
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ONEDRIVE SETTINGS  — Calendarific API key stored in OneDrive, not locally.
-#  Loaded after authentication. Popup shown if key is missing or blank.
-#  File: Apps/FestivalTimeline/settings.json  (inside your OneDrive)
+#  GRAPH API HELPER
 # ═══════════════════════════════════════════════════════════════════════════════
+
+function Invoke-Graph {
+    param(
+        [string]   $Method = 'GET',
+        [string]   $Uri,
+        [hashtable]$Body
+    )
+
+    $params = @{ Method = $Method; Uri = $Uri }
+
+    if ($Body) {
+        $params.ContentType = 'application/json'
+        $params.Body        = ($Body | ConvertTo-Json -Depth 10)
+    }
+
+    return Invoke-MgGraphRequest @params
+}
 
 function Load-OneDriveSettings {
     Write-Host '[Settings] Loading settings from OneDrive...' -ForegroundColor Cyan
@@ -414,187 +311,38 @@ function Show-ApiKeyDialog {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  AUTHENTICATION  — Microsoft Graph Authorization Code Flow (browser popup)
-#  Opens the Microsoft login page in the default browser. A local HTTP listener
-#  on localhost catches the OAuth redirect and extracts the auth code.
-#  No credentials are typed into the terminal.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-$script:AccessToken  = $null
-$script:RefreshToken = $null
-$script:TokenExpiry  = [DateTime]::MinValue
-
-# Fixed redirect URI — must also be registered in your Azure app:
-#   Authentication → Add platform → Web → http://localhost:8765/
-$OAuthRedirectUri = 'http://localhost:8765/'
-$OAuthScope       = 'https://graph.microsoft.com/Files.ReadWrite offline_access'
-
-function Get-AccessToken {
-    Write-Host '[Auth] Opening Microsoft sign-in in your browser...' -ForegroundColor Cyan
-
-    # Build the authorization URL
-    $state   = [System.Guid]::NewGuid().ToString('N')
-    $authUrl = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize" +
-               "?client_id=$($Config.ClientId)" +
-               "&response_type=code" +
-               "&redirect_uri=$([Uri]::EscapeDataString($OAuthRedirectUri))" +
-               "&scope=$([Uri]::EscapeDataString($OAuthScope))" +
-               "&state=$state" +
-               "&prompt=select_account"
-
-    # Start local HTTP listener BEFORE opening browser
-    $listener = [System.Net.HttpListener]::new()
-    $listener.Prefixes.Add($OAuthRedirectUri)
-    try { $listener.Start() }
-    catch {
-        Write-Error "[Auth] Cannot start local listener on $OAuthRedirectUri. Port 8765 may be in use."
-        return
-    }
-
-    # Open browser
-    Start-Process $authUrl
-
-    Write-Host '[Auth] Waiting for sign-in to complete in browser...' -ForegroundColor Gray
-
-    # Wait for the redirect (60-second timeout)
-    $contextTask = $listener.GetContextAsync()
-    $waited      = 0
-    while (-not $contextTask.IsCompleted -and $waited -lt 120) {
-        Start-Sleep -Milliseconds 500
-        $waited++
-    }
-
-    $listener.Stop()
-
-    if (-not $contextTask.IsCompleted) {
-        Write-Error '[Auth] Timed out waiting for browser sign-in. Please re-run the script.'
-        return
-    }
-
-    $context  = $contextTask.Result
-    $rawUrl   = $context.Request.Url.ToString()
-
-    # Send a friendly close page to the browser
-    $html     = '<html><body style="font-family:Segoe UI;text-align:center;margin-top:80px">' +
-                '<h2>&#10003; Signed in successfully!</h2>' +
-                '<p>You can close this tab and return to the terminal.</p></body></html>'
-    $bytes    = [System.Text.Encoding]::UTF8.GetBytes($html)
-    $context.Response.ContentType   = 'text/html; charset=utf-8'
-    $context.Response.ContentLength64 = $bytes.Length
-    $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $context.Response.Close()
-
-    # Parse query string from redirect URL
-    $query = [System.Web.HttpUtility]::ParseQueryString(([Uri]$rawUrl).Query)
-
-    if ($query['error']) {
-        Write-Error "[Auth] Sign-in error: $($query['error_description'])"
-        return
-    }
-
-    $returnedState = $query['state']
-    if ($returnedState -ne $state) {
-        Write-Error '[Auth] State mismatch — possible CSRF. Aborting.'
-        return
-    }
-
-    $code = $query['code']
-    if (-not $code) {
-        Write-Error '[Auth] No authorization code returned. Please try again.'
-        return
-    }
-
-    # Exchange auth code for tokens
-    $token = Invoke-RestMethod -Method POST `
-        -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token' `
-        -ContentType 'application/x-www-form-urlencoded' `
-        -Body @{
-            client_id    = $Config.ClientId
-            grant_type   = 'authorization_code'
-            code         = $code
-            redirect_uri = $OAuthRedirectUri
-            scope        = $OAuthScope
-        }
-
-    $script:AccessToken  = $token.access_token
-    $script:RefreshToken = $token.refresh_token
-    $script:TokenExpiry  = (Get-Date).AddSeconds([int]$token.expires_in - 60)
-
-    Write-Host '[Auth] Signed in to OneDrive successfully.' -ForegroundColor Green
-}
-
-function Refresh-AccessToken {
-    Write-Host '[Auth] Refreshing access token...' -ForegroundColor Gray
-    $token = Invoke-RestMethod -Method POST `
-        -Uri 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token' `
-        -ContentType 'application/x-www-form-urlencoded' `
-        -Body @{
-            client_id     = $Config.ClientId
-            grant_type    = 'refresh_token'
-            refresh_token = $script:RefreshToken
-            scope         = $OAuthScope
-        }
-    $script:AccessToken  = $token.access_token
-    $script:RefreshToken = $token.refresh_token
-    $script:TokenExpiry  = (Get-Date).AddSeconds([int]$token.expires_in - 60)
-    Write-Host '[Auth] Token refreshed.' -ForegroundColor Gray
-}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  GRAPH API HELPER
-# ═══════════════════════════════════════════════════════════════════════════════
-
-function Invoke-Graph {
-    param(
-        [string]   $Method = 'GET',
-        [string]   $Uri,
-        [hashtable]$Body
-    )
-
-    # Silently refresh token if close to expiry (no browser popup needed)
-    if ((Get-Date) -ge $script:TokenExpiry) {
-        if ($script:RefreshToken) { Refresh-AccessToken }
-        else                      { Get-AccessToken }
-    }
-
-    $params = @{
-        Method  = $Method
-        Uri     = $Uri
-        Headers = @{ Authorization = "Bearer $script:AccessToken" }
-    }
-
-    if ($Body) {
-        $params.ContentType = 'application/json'
-        $params.Body        = ($Body | ConvertTo-Json -Depth 10)
-    }
-
-    return Invoke-RestMethod @params
-}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  ONEDRIVE FILE HELPERS
+#  ONEDRIVE FILE HELPERS  — all calls use Invoke-MgGraphRequest
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function Read-OneDriveJson {
     param([string]$RelativePath)
     try {
-        return Invoke-RestMethod -Method GET `
+        $bytes = Invoke-MgGraphRequest -Method GET `
             -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content" `
-            -Headers @{ Authorization = "Bearer $script:AccessToken" }
+            -OutputType HttpResponseMessage
+        # SDK returns HttpResponseMessage — read content as string then parse
+        $json = $bytes.Content.ReadAsStringAsync().Result
+        return $json | ConvertFrom-Json
     }
     catch {
-        $code = $_.Exception.Response.StatusCode.value__
-        if ($code -eq 404) { return $null }
-        throw
+        $status = $_.Exception.Response.StatusCode.value__
+        if ($status -eq 404) { return $null }
+        # Fallback: try as raw response
+        try {
+            return Invoke-MgGraphRequest -Method GET `
+                -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content"
+        } catch {
+            if ($_.Exception.Message -match '404|itemNotFound') { return $null }
+            throw
+        }
     }
 }
 
 function Write-OneDriveJson {
     param([string]$RelativePath, [object]$Data)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes(($Data | ConvertTo-Json -Depth 20 -Compress))
-    Invoke-RestMethod -Method PUT `
+    Invoke-MgGraphRequest -Method PUT `
         -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content" `
-        -Headers @{ Authorization = "Bearer $script:AccessToken" } `
         -ContentType 'application/json; charset=utf-8' `
         -Body $bytes | Out-Null
 }
@@ -610,8 +358,7 @@ function Ensure-OneDriveFolder {
         }
         $current = if ($current -eq '') { $part } else { "$current/$part" }
         try {
-            Invoke-RestMethod -Method POST -Uri $parentUri `
-                -Headers @{ Authorization = "Bearer $script:AccessToken" } `
+            Invoke-MgGraphRequest -Method POST -Uri $parentUri `
                 -ContentType 'application/json' `
                 -Body (@{
                     name = $part
@@ -1033,7 +780,7 @@ Write-Host "  Tracking festivals: $($Config.FestivalsToTrack -join ', ')" -Foreg
 Write-Host ''
 
 # ── Phase 1: Authenticate ──────────────────────────────────────────────────
-Get-AccessToken
+Connect-ToOneDrive
 
 # Ensure the state folder exists in OneDrive before any reads/writes
 Ensure-OneDriveFolder -FolderPath $Config.StateFolder

@@ -22,7 +22,12 @@
 [CmdletBinding()]
 param(
     [switch]$Rescan,
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    # Optional path to a local festivals_config.json produced by Get-HinduFestivals.ps1.
+    # When provided, the file is uploaded to OneDrive and used for this run.
+    # On subsequent runs without this param, the copy stored in OneDrive is used.
+    [string]$FestivalsConfig = ''
 )
 
 Set-StrictMode -Version Latest
@@ -72,22 +77,8 @@ $Config = @{
     )
 }
 
-# Load festival selection from festivals_config.json if present (overrides built-in list)
-$FestivalsConfigPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'festivals_config.json'
-if (Test-Path $FestivalsConfigPath) {
-    try {
-        $fc = Get-Content $FestivalsConfigPath -Raw | ConvertFrom-Json
-        if ($fc.FestivalsToTrack -and $fc.FestivalsToTrack.Count -gt 0) {
-            $Config.FestivalsToTrack = @($fc.FestivalsToTrack)
-            Write-Host "[Config] Loaded $($Config.FestivalsToTrack.Count) festivals from festivals_config.json" -ForegroundColor Green
-        }
-    } catch {
-        Write-Warning "[Config] Could not read festivals_config.json — using built-in list."
-    }
-} else {
-    Write-Host "[Config] No festivals_config.json found — using built-in FestivalsToTrack list." -ForegroundColor Gray
-    Write-Host "         Tip: run Get-HinduFestivals.ps1 to build your own selection." -ForegroundColor Gray
-}
+# OneDrive path for the festival selection (loaded after auth)
+$OneDriveFestivalsConfigPath = "$($Config.StateFolder)/festivals_config.json"
 
 # Local path — stores only the Azure App ClientId (not the API key)
 $LocalConfigPath = "$env:APPDATA\FestivalAlbums\config.json"
@@ -268,6 +259,53 @@ function Save-OneDriveSettings {
         saved_on           = (Get-Date -Format 'o')
     }
     Write-Host '[Settings] API key saved to OneDrive.' -ForegroundColor Green
+}
+
+function Load-FestivalsConfig {
+    <#
+      Priority order:
+        1. -FestivalsConfig <path> was passed → validate, upload to OneDrive, use it
+        2. No param → try to load from OneDrive
+        3. Not in OneDrive either → fall back to built-in list
+    #>
+
+    if (-not [string]::IsNullOrWhiteSpace($FestivalsConfig)) {
+        # ── Local file explicitly provided ──
+        if (-not (Test-Path $FestivalsConfig)) {
+            Write-Warning "[Config] -FestivalsConfig file not found: $FestivalsConfig — using built-in list."
+            return
+        }
+        try {
+            $fc = Get-Content $FestivalsConfig -Raw | ConvertFrom-Json
+            if ($fc.FestivalsToTrack -and $fc.FestivalsToTrack.Count -gt 0) {
+                $Config.FestivalsToTrack = @($fc.FestivalsToTrack)
+                Write-Host "[Config] Loaded $($Config.FestivalsToTrack.Count) festivals from local file: $FestivalsConfig" -ForegroundColor Green
+
+                # Upload to OneDrive so future runs without -FestivalsConfig use it
+                Write-Host '[Config] Uploading festivals_config.json to OneDrive...' -ForegroundColor Cyan
+                Write-OneDriveJson -RelativePath $OneDriveFestivalsConfigPath -Data $fc
+                Write-Host '[Config] festivals_config.json saved to OneDrive.' -ForegroundColor Green
+            } else {
+                Write-Warning '[Config] Provided file has no festivals — using built-in list.'
+            }
+        } catch {
+            Write-Warning "[Config] Could not read $FestivalsConfig`: $_ — using built-in list."
+        }
+        return
+    }
+
+    # ── No local file provided — try OneDrive ──
+    Write-Host '[Config] Loading festivals_config.json from OneDrive...' -ForegroundColor Cyan
+    $raw = Read-OneDriveJson -RelativePath $OneDriveFestivalsConfigPath
+    if ($raw -and $raw.FestivalsToTrack -and $raw.FestivalsToTrack.Count -gt 0) {
+        $Config.FestivalsToTrack = @($raw.FestivalsToTrack)
+        Write-Host "[Config] Loaded $($Config.FestivalsToTrack.Count) festivals from OneDrive." -ForegroundColor Green
+        return
+    }
+
+    # ── Not found anywhere — fall back ──
+    Write-Host '[Config] No festivals_config.json in OneDrive — using built-in FestivalsToTrack list.' -ForegroundColor Gray
+    Write-Host '         Tip: run Get-HinduFestivals.ps1 then pass -FestivalsConfig to upload your selection.' -ForegroundColor Gray
 }
 
 function Show-ApiKeyDialog {
@@ -1012,6 +1050,9 @@ if (-not $apiKey) {
     Write-Host '[Settings] API key found in OneDrive.' -ForegroundColor Green
 }
 $Config.CalendarificApiKey = $apiKey
+
+# ── Load festival selection (local file → OneDrive → built-in fallback) ─────
+Load-FestivalsConfig
 
 # ── Load State ─────────────────────────────────────────────────────────────
 $state = Load-State

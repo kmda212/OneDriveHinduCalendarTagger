@@ -30,7 +30,7 @@ param(
     [string]$FestivalsConfig = ''
 )
 
-Set-StrictMode -Version 2.0
+Set-StrictMode -Version 1.0
 $ErrorActionPreference = 'Stop'
 
 # ── Ensure Microsoft Graph SDK modules are available ──────────────────────────
@@ -571,14 +571,11 @@ function Invoke-PhotoScan {
             $page = Invoke-Graph -Uri $uri
 
             foreach ($item in $page.value) {
-                if (-not $item.file) { continue }  # skip folders
+                if (-not $item.PSObject.Properties['file']?.Value) { continue }  # skip folders
 
                 # Prefer EXIF capture date (photo facet), fall back to file creation date.
-                # Safe null-chain: .photo is absent on non-JPEG files, chaining onto
-                # $null throws in strict mode, so we guard with PSObject.Properties.
-                $takenDateTime = if ($item.photo -ne $null) {
-                    $item.photo.PSObject.Properties['takenDateTime']?.Value
-                } else { $null }
+                $photoFacet   = $item.PSObject.Properties['photo']?.Value
+                $takenDateTime = $photoFacet?.PSObject.Properties['takenDateTime']?.Value
                 $rawDate = if ($takenDateTime) { $takenDateTime } else { $item.createdDateTime }
                 if ($takenDateTime) { $script:ExifCount++ }
 
@@ -600,7 +597,7 @@ function Invoke-PhotoScan {
             Write-Progress -Activity 'Scanning OneDrive photos' `
                 -Status "Extension: $ext  |  Scanned: $scanned  |  Festival photos: $totalFound"
 
-            $nextUri = $page.'@odata.nextLink'
+            $nextUri = $page.PSObject.Properties['@odata.nextLink']?.Value
 
             # Checkpoint: save current extension, page token, and photo map
             $mapSnapshot = @{}

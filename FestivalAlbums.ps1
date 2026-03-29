@@ -30,7 +30,7 @@ param(
     [string]$FestivalsConfig = ''
 )
 
-Set-StrictMode -Version Latest
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 # ── Ensure Microsoft Graph SDK modules are available ──────────────────────────

@@ -319,10 +319,13 @@ function Read-OneDriveJson {
     try {
         return Invoke-MgGraphRequest -Method GET `
             -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content" `
-            -OutputType PSObject
+            -OutputType PSObject -ErrorAction Stop
     }
     catch {
-        if ($_.Exception.Message -match '404|itemNotFound') { return $null }
+        # Invoke-MgGraphRequest surfaces HTTP errors in ErrorDetails.Message (the raw
+        # response body), not in Exception.Message — check both to catch 404s silently.
+        $detail = "$($_.Exception.Message) $($_.ErrorDetails.Message) $($_.Exception.InnerException)"
+        if ($detail -match '404|itemNotFound') { return $null }
         throw
     }
 }

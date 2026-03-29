@@ -574,8 +574,10 @@ function Invoke-PhotoScan {
                 if (-not $item.PSObject.Properties['file']?.Value) { continue }  # skip folders
 
                 # Prefer EXIF capture date (photo facet), fall back to file creation date.
-                $photoFacet   = $item.PSObject.Properties['photo']?.Value
-                $takenDateTime = $photoFacet?.PSObject.Properties['takenDateTime']?.Value
+                $photoFacet    = $item.PSObject.Properties['photo']?.Value
+                $takenDateTime = if ($null -ne $photoFacet) {
+                    $photoFacet.PSObject.Properties['takenDateTime']?.Value
+                } else { $null }
                 $rawDate = if ($takenDateTime) { $takenDateTime } else { $item.createdDateTime }
                 if ($takenDateTime) { $script:ExifCount++ }
 

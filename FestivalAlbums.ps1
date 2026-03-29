@@ -92,8 +92,9 @@ $OneDriveSettingsPath = "$($Config.StateFolder)/settings.json"
 # Album name = festival name + this suffix  (e.g. "Diwali Over the years")
 $AlbumSuffix = 'Over the years'
 
-# Image file extensions to scan
-$ImageExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff')
+# Photo and video file extensions to scan
+$MediaExtensions = @('.jpg', '.jpeg', '.heic', '.png', '.gif', '.bmp', '.tiff',
+                     '.mp4', '.mov', '.avi', '.mkv')
 
 # Microsoft Graph base URL
 $GraphBase = 'https://graph.microsoft.com/v1.0'
@@ -433,7 +434,7 @@ function New-EmptyState {
         completed_phases = @()
         current_phase    = 'init'
         photo_scan       = @{
-            extension_index    = 0      # index into $ImageExtensions currently being scanned
+            extension_index    = 0      # index into $MediaExtensions currently being scanned
             next_link          = $null  # Graph API pagination token for the current extension
             total_scanned      = 0
             festival_photo_map = @{}    # festival_name -> [file_id, ...]
@@ -590,18 +591,18 @@ function Invoke-PhotoScan {
     $resumeExtIdx = [int]$State.photo_scan.extension_index
     $resumeLink   = $State.photo_scan.next_link
 
-    for ($extIdx = $resumeExtIdx; $extIdx -lt $ImageExtensions.Count; $extIdx++) {
-        $ext = $ImageExtensions[$extIdx]
+    for ($extIdx = $resumeExtIdx; $extIdx -lt $MediaExtensions.Count; $extIdx++) {
+        $ext = $MediaExtensions[$extIdx]
 
         # On the resumed extension use the saved nextLink; all others start fresh
         $uri = if ($extIdx -eq $resumeExtIdx -and $resumeLink) {
             $resumeLink
         } else {
-            "$GraphBase/me/drive/root/search(q='$ext')?`$select=id,name,photo,createdDateTime,file&`$top=200"
+            "$GraphBase/me/drive/root/search(q='$ext')?`$select=id,name,photo,createdDateTime,fileSystemInfo,file&`$top=200"
         }
         $resumeLink = $null  # only apply saved link once
 
-        Write-Host "[Scan] Extension $($extIdx+1)/$($ImageExtensions.Count): $ext" -ForegroundColor Gray
+        Write-Host "[Scan] Extension $($extIdx+1)/$($MediaExtensions.Count): $ext" -ForegroundColor Gray
 
         while ($uri) {
             $page = Invoke-Graph -Uri $uri
@@ -619,9 +620,15 @@ function Invoke-PhotoScan {
             foreach ($item in $page.value) {
                 if (-not $item.PSObject.Properties['file']?.Value) { continue }  # skip folders
 
-                # Use EXIF takenDateTime from batch fetch; fall back to createdDateTime.
+                # Use EXIF takenDateTime from batch fetch (most accurate).
+                # Fall back to fileSystemInfo.createdDateTime (device/camera date),
+                # then to createdDateTime (OneDrive upload date — least accurate).
                 $takenDateTime = $exifMap[$item.id]
-                $rawDate = if ($takenDateTime) { $takenDateTime } else { $item.createdDateTime }
+                $fsi           = $item.PSObject.Properties['fileSystemInfo']?.Value
+                $deviceDate    = if ($null -ne $fsi) { $fsi.PSObject.Properties['createdDateTime']?.Value } else { $null }
+                $rawDate       = if ($takenDateTime) { $takenDateTime }
+                                 elseif ($deviceDate) { $deviceDate }
+                                 else                 { $item.createdDateTime }
                 if ($takenDateTime) { $script:ExifCount++ }
 
                 $dateKey = try { ([DateTime]::Parse($rawDate)).ToString('yyyy-MM-dd') } catch { $null }
@@ -911,3 +918,4 @@ if ($DryRun) {
     Write-Host '  Open OneDrive → Photos → Albums to see them.' -ForegroundColor Green
     Write-Host "$bar`n" -ForegroundColor Green
 }
+

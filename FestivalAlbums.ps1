@@ -136,12 +136,47 @@ function Invoke-Graph {
         $params.Body        = ($Body | ConvertTo-Json -Depth 10)
     }
 
-    # -OutputType PSObject converts the top-level object but nested collections
-    # (e.g. the 'value' array items) can still come back as Hashtables in some
-    # SDK versions. A JSON round-trip forces deep conversion to PSCustomObject
-    # so dot-notation works on every nested property ($item.photo, $item.file, etc.)
+    # Use -OutputType Json + ConvertFrom-Json for deep recursive PSCustomObject
+    # conversion so dot-notation works on all nested properties.
     $raw = Invoke-MgGraphRequest @params -OutputType Json
     return $raw | ConvertFrom-Json
+}
+
+# Fetch takenDateTime for a batch of file IDs using the Graph $batch endpoint.
+# The search endpoint does not reliably return the photo facet; per-file GETs
+# are needed. Batching 20 requests per call keeps API overhead low.
+# Returns hashtable: { fileId -> takenDateTime string } (only entries with EXIF)
+function Get-ExifDates {
+    param([string[]]$FileIds)
+
+    $exifMap   = @{}
+    $batchSize = 20
+
+    for ($i = 0; $i -lt $FileIds.Count; $i += $batchSize) {
+        $chunk    = $FileIds[$i..([Math]::Min($i + $batchSize - 1, $FileIds.Count - 1))]
+        $reqIdx   = 0
+        $requests = $chunk | ForEach-Object {
+            @{ id = "$reqIdx"; method = 'GET'; url = "/me/drive/items/$_`?`$select=id,photo" }
+            $reqIdx++
+        }
+
+        try {
+            $batchResp = Invoke-Graph -Method POST -Uri "$GraphBase/`$batch" `
+                -Body @{ requests = $requests }
+
+            foreach ($resp in $batchResp.responses) {
+                if ($resp.status -ne 200) { continue }
+                $photoFacet = $resp.body.PSObject.Properties['photo']?.Value
+                if ($null -eq $photoFacet) { continue }
+                $taken = $photoFacet.PSObject.Properties['takenDateTime']?.Value
+                if ($taken) { $exifMap[$resp.body.id] = $taken }
+            }
+        } catch {
+            Write-Warning "[EXIF] Batch request failed (chunk $i): $_"
+        }
+    }
+
+    return $exifMap
 }
 
 function Load-OneDriveSettings {
@@ -570,14 +605,21 @@ function Invoke-PhotoScan {
         while ($uri) {
             $page = Invoke-Graph -Uri $uri
 
+            # Collect file IDs from this page, then batch-fetch real EXIF takenDateTime.
+            # The search endpoint does not populate the photo facet; per-file GETs are needed.
+            $pageFileIds = @($page.value | Where-Object {
+                $_.PSObject.Properties['file']?.Value
+            } | ForEach-Object { $_.id })
+
+            $exifMap = if ($pageFileIds.Count -gt 0) {
+                Get-ExifDates -FileIds $pageFileIds
+            } else { @{} }
+
             foreach ($item in $page.value) {
                 if (-not $item.PSObject.Properties['file']?.Value) { continue }  # skip folders
 
-                # Prefer EXIF capture date (photo facet), fall back to file creation date.
-                $photoFacet    = $item.PSObject.Properties['photo']?.Value
-                $takenDateTime = if ($null -ne $photoFacet) {
-                    $photoFacet.PSObject.Properties['takenDateTime']?.Value
-                } else { $null }
+                # Use EXIF takenDateTime from batch fetch; fall back to createdDateTime.
+                $takenDateTime = $exifMap[$item.id]
                 $rawDate = if ($takenDateTime) { $takenDateTime } else { $item.createdDateTime }
                 if ($takenDateTime) { $script:ExifCount++ }
 

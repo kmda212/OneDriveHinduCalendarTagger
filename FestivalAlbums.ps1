@@ -136,7 +136,12 @@ function Invoke-Graph {
         $params.Body        = ($Body | ConvertTo-Json -Depth 10)
     }
 
-    return Invoke-MgGraphRequest @params -OutputType PSObject
+    # -OutputType PSObject converts the top-level object but nested collections
+    # (e.g. the 'value' array items) can still come back as Hashtables in some
+    # SDK versions. A JSON round-trip forces deep conversion to PSCustomObject
+    # so dot-notation works on every nested property ($item.photo, $item.file, etc.)
+    $raw = Invoke-MgGraphRequest @params -OutputType Json
+    return $raw | ConvertFrom-Json
 }
 
 function Load-OneDriveSettings {
@@ -317,9 +322,10 @@ function Show-ApiKeyDialog {
 function Read-OneDriveJson {
     param([string]$RelativePath)
     try {
-        return Invoke-MgGraphRequest -Method GET `
+        $raw = Invoke-MgGraphRequest -Method GET `
             -Uri "$GraphBase/me/drive/root:/$RelativePath`:/content" `
-            -OutputType PSObject -ErrorAction Stop
+            -OutputType Json -ErrorAction Stop
+        return $raw | ConvertFrom-Json
     }
     catch {
         # Invoke-MgGraphRequest surfaces HTTP errors in ErrorDetails.Message (the raw

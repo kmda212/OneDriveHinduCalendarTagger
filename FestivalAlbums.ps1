@@ -153,12 +153,15 @@ function Get-ExifDates {
     $batchSize = 20
 
     for ($i = 0; $i -lt $FileIds.Count; $i += $batchSize) {
-        $chunk    = $FileIds[$i..([Math]::Min($i + $batchSize - 1, $FileIds.Count - 1))]
-        $reqIdx   = 0
-        $requests = $chunk | ForEach-Object {
-            @{ id = "$reqIdx"; method = 'GET'; url = "/me/drive/items/$_`?`$select=id,photo" }
-            $reqIdx++
-        }
+        $chunk = $FileIds[$i..([Math]::Min($i + $batchSize - 1, $FileIds.Count - 1))]
+
+        # Build requests list using a plain for-loop so the index variable
+        # increments correctly (ForEach-Object runs in a child scope).
+        # Wrap in [object[]] cast so ConvertTo-Json always emits a JSON array
+        # even when the chunk has only one item.
+        $requests = [object[]](for ($j = 0; $j -lt $chunk.Count; $j++) {
+            @{ id = "$j"; method = 'GET'; url = "/me/drive/items/$($chunk[$j])?`$select=id,photo" }
+        })
 
         try {
             $batchResp = Invoke-Graph -Method POST -Uri "$GraphBase/`$batch" `
